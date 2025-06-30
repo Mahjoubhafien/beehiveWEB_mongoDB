@@ -33,6 +33,7 @@ void dht_test(void *pvParameters)
     vTaskDelay(pdMS_TO_TICKS(2000));
 
    while (1) {
+	   	static int iteration_count = 0;
     esp_err_t res = dht_read_float_data(DHT_TYPE, DHT_GPIO, &humidity, &temperature);
     if (res == ESP_OK) {
         ESP_LOGI("DHT21_Example", "Humidity: %.1f %%  Temperature: %.1f C", humidity, temperature);
@@ -45,6 +46,11 @@ void dht_test(void *pvParameters)
         ESP_LOGE("DHT21_Example", "Failed to read from DHT sensor: %s", esp_err_to_name(res));
     }
 
-    vTaskDelay(pdMS_TO_TICKS(2000));  // 2 seconds delay
+        if (iteration_count < 50) {
+            vTaskDelay(pdMS_TO_TICKS(2000));  // 1 second
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(3600000));  // 1H
+        }
+        iteration_count++;
 }
 }

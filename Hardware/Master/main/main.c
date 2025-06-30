@@ -19,6 +19,7 @@ QueueHandle_t espnowQueue;  // Add this with your other queue definitions
 QueueHandle_t alertConfigQueue;
 
 SemaphoreHandle_t sim800_uart_mutex = NULL;
+char ip_address[] = "102.159.90.106";
 
 typedef struct __attribute__((packed)) {
     char sensor_id[12];
@@ -133,6 +134,7 @@ void sim800c_init(void){
     sim800_send_command("AT+SAPBR=1,1");   // Activate bearer profile
     sim800_wait_response();
 
+
     sim800_send_command("AT+SAPBR=2,1");   // Query bearer profile (check if connected)
     sim800_wait_response();
     
@@ -213,17 +215,22 @@ void app_main(void) {
    	 sim800c_init();
    	 
   /////////////////////////////////////////////// Start tasks ////////////////////////////////////
- 
+  
+   //first 50 every 2s then the rest every 1H
   xTaskCreate(dht_test, "dht21_task", 4096, NULL, 6, NULL);
   
+   //first 10 every 2s then the rest every 1H
   xTaskCreate(gps_task, "gps_task", 4096, NULL, 6, NULL);
   
+   //first 5 every 2s then the rest every 1H
   xTaskCreate(sim800c_task, "sim800c_task", 8192, NULL, 6, NULL);
   
+  //Every 5s
   xTaskCreate(sms_control_task, "sms_control_task", 8192, NULL, 6, NULL);
 
   xTaskCreate(espnow_receiver_task, "espnow_receiver_task", 4096, NULL, 5, NULL);
  
+ //every 30 minute
   xTaskCreate(getWebServerData_task, "getWebServerData_task", 4096, NULL, 6, NULL);
 
   ESP_LOGI(TAG, "ESP-NOW Receiver initialized and waiting for data...");

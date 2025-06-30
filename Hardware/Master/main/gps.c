@@ -20,6 +20,8 @@ void gps_task(void *arg) {
     char gpgga_sentence[RD_BUF_SIZE] = {0};  // Initialize buffer
 
     while (1) {
+			static int iteration_count = 0;
+
         ESP_LOGI("GPS", "GPS Task running...");
 
         // Read data from UART
@@ -90,7 +92,12 @@ void gps_task(void *arg) {
             ESP_LOGE("GPS", "No data received from GPS");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(1500));
+        if (iteration_count < 10) {
+            vTaskDelay(pdMS_TO_TICKS(2000));  // 1 second
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(3600000));  // 1H
+        }
+        iteration_count++;
     }
 
     free(data);

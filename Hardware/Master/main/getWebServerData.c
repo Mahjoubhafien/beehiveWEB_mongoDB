@@ -53,7 +53,7 @@ void getWebServerData_task(void *pvParameters) {
 	while(1){
 					  if (xSemaphoreTake(sim800_uart_mutex, portMAX_DELAY) == pdTRUE) {
 char command[256];
-char ip_address[] = "102.159.97.105";
+//char ip_address[] = "102.159.90.106";
 int user_id = 1;
 
 	ESP_LOGI("SIM800C", "=== Starting HTTP GET Task ===");
@@ -99,7 +99,7 @@ ESP_LOGI("CONFIG",
     ESP_LOGI("SIM800C", "=== HTTP GET Done ===");
     	    	xSemaphoreGive(sim800_uart_mutex); // release after done
 
-   vTaskDelay(pdMS_TO_TICKS(10000));  // 300000 ms = 5 minutes
+   vTaskDelay(pdMS_TO_TICKS(1800000));  // 30 min
 
     }else{
 	vTaskDelay(pdMS_TO_TICKS(1000)); // Retry if mutex unavailable

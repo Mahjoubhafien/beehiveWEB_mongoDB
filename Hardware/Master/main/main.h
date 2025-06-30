@@ -22,8 +22,9 @@
 #define WIFI_SSID      "TOPNET_3D78"
 #define WIFI_PASSWORD  "Hafiene2025"
 #define WIFI_CONNECTED_BIT BIT0
+#define IP_ADDR_MAX_LEN 32
 extern SemaphoreHandle_t sim800_uart_mutex;
-extern char ip_address[];
+extern char ip_address[IP_ADDR_MAX_LEN];
 extern int user_id;
 
 typedef struct {

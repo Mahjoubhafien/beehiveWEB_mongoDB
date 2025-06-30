@@ -21,7 +21,7 @@ void sms_control_task(void *pvParameters) {
     int total_len = 0, len = 0;  // Declare here
 
     while (1) {
-				char ip_address[] = "102.159.97.105";
+				//char ip_address[] = "102.159.90.106";
 				int user_id = 1;
 			  if (xSemaphoreTake(sim800_uart_mutex, portMAX_DELAY) == pdTRUE) {
 				  
@@ -66,8 +66,26 @@ void sms_control_task(void *pvParameters) {
 
                 // Get next line (message body)
                 char *body = strtok(NULL, "\r\n");
-
-                if (body != NULL && index > 0) {
+                
+                //Restart ESP 
+                if (strcasecmp(body, "Admin Restart") == 0) {
+    ESP_LOGW(TAG_SMS, "Admin command received: restarting...");
+    sim800_send_sms(number, "The System is restarting by admin!");
+    vTaskDelay(pdMS_TO_TICKS(2000)); // allow SMS to finish
+    esp_restart();
+}else if (strncasecmp(body, "Admin ip: ", 10) == 0) {
+    // the SMS starts with "Admin "
+    const char *new_ip = body + 10; // points to the next part after "Admin "
+    if (strlen(new_ip) < 32) { // some sanity check
+        strncpy(ip_address, new_ip, sizeof(ip_address) - 1);
+        ip_address[sizeof(ip_address) - 1] = '\0'; // null-terminate
+        ESP_LOGW(TAG_SMS, "Admin changed IP to: %s", ip_address);
+        sim800_send_sms(number, "IP Address updated successfully!");
+    } else {
+        sim800_send_sms(number, "IP address too long");
+    }
+}
+                else if (body != NULL && index > 0 && strcasecmp(body, "Admin Restart") != 0 && (strncasecmp(body, "Admin ip_address", 6) != 0)) {
                     ESP_LOGI(TAG_SMS, "SMS from %s: %s", number, body);
 
 					char url[256];
@@ -128,19 +146,19 @@ void sms_control_task(void *pvParameters) {
                                 const cJSON *humidity = cJSON_GetObjectItem(data, "humidity");
                                 const cJSON *latitude = cJSON_GetObjectItem(data, "latitude");
                                 const cJSON *longitude = cJSON_GetObjectItem(data, "longitude");
-                                const cJSON *hive_state = cJSON_GetObjectItem(data, "hive_state");
+                                const cJSON *weight = cJSON_GetObjectItem(data, "weight");
 
                                 char sms_msg[300];
                                 snprintf(sms_msg, sizeof(sms_msg),
                                     "Sensor: %s\n"
                                     "Temp: %s C\n"
                                     "Humidity: %s%%\n"
-                                    "Hive: %s\n"
+                                    "Weight: %s Kg\n"
                                     "Map: https://maps.google.com/?q=%s,%s",
                                     sensor_id && sensor_id->valuestring ? sensor_id->valuestring : "Sensor not found for this user",
                                     temperature && temperature->valuestring ? temperature->valuestring : "N/A",
                                     humidity && humidity->valuestring ? humidity->valuestring : "N/A",
-                                    hive_state && hive_state->valuestring ? hive_state->valuestring : "N/A",
+                                    weight && weight->valuestring ? weight->valuestring : "N/A",
                                     latitude && latitude->valuestring ? latitude->valuestring : "0",
                                     longitude && longitude->valuestring ? longitude->valuestring : "0"
                                 );

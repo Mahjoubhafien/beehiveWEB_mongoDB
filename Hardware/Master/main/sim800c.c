@@ -285,15 +285,15 @@ void sim800_http_post_task(void) {
 
 		  // === Delayed Execution Based on Iteration ===
         if (iteration_count < 5) {
-            vTaskDelay(pdMS_TO_TICKS(1000));  // 1 second
+            vTaskDelay(pdMS_TO_TICKS(2000));  // 1 second
         } else {
-            vTaskDelay(pdMS_TO_TICKS(60000));  // 1 minute
+            vTaskDelay(pdMS_TO_TICKS(3600000));  // 1H
         }
         iteration_count++;
   if (xSemaphoreTake(sim800_uart_mutex, portMAX_DELAY) == pdTRUE) {
   if (!sim800Reset){
 		char command[128];
-		char ip_address[] = "102.159.97.105";
+		//char ip_address[] = "102.159.90.106";
 
 		DHTData_t tempDHT;
 		GPSData_t tempGPS;
