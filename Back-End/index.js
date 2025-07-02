@@ -11,9 +11,11 @@ import { Strategy as LocalStrategy } from "passport-local";
 import GoogleStrategy from "passport-google-oauth2";
 import bcrypt from "bcrypt";
 import env from "dotenv";
-import { SensorsData } from './models/SensorsData.js'; // adjust the path accordingly
-import { User } from './models/Users.js'; // adjust the path accordingly
-import { Beehive } from './models/Beehives.js'; // adjust the path accordingly
+import { SensorsData } from './models/SensorsData.js'; 
+import { User } from './models/Users.js'; 
+import { Beehive } from './models/Beehives.js'; 
+import { SmsAlertSettings } from "./models/SmsAlertSettings.js";
+import { AlertsHistory } from './models/AlertsHistory.js'; 
 
 env.config();
 
@@ -328,28 +330,24 @@ app.post("/temphum", async (req, res) => {
 
   const sensors = [local_sensor, remote_sensor];
 
-  const insertQuery = `
-    INSERT INTO sensors_data (sensor_id, temperature, humidity, latitude, longitude, battery_voltage)
-    VALUES ($1, $2, $3, $4, $5, $6)
-  `;
-
   try {
-    for (const sensor of sensors) {
-      const values = [
-        sensor.id,
-        sensor.temperature,
-        sensor.humidity,
-        sensor.latitude,
-        sensor.longitude,
-        sensor.battery_voltage || null  // fallback if voltage is missing
-      ];
+    // prepare documents to insert
+    const documents = sensors.map(sensor => ({
+      sensor_id: sensor.id,
+      temperature: sensor.temperature,
+      humidity: sensor.humidity,
+      latitude: sensor.latitude,
+      longitude: sensor.longitude,
+      battery_voltage: sensor.battery_voltage || null,
+      // other fields like hive_state and weight will remain undefined unless you fill them here
+    }));
 
-      await db.query(insertQuery, values);
-    }
+    // insert them all at once
+    await SensorsData.insertMany(documents);
 
     res.status(200).send("Data received and stored successfully!");
   } catch (error) {
-    console.error("Error inserting data into PostgreSQL:", error);
+    console.error("Error inserting data into MongoDB:", error);
     res.status(500).send("Database insertion error");
   }
 });
@@ -665,67 +663,51 @@ app.post("/admin/edit-hive", async (req, res) => {
       return res.status(400).json({ message: "You changed nothing" });
     }
 
-    // 1. First, get the hive_id from the sensor_id
-    const getHiveIdQuery = "SELECT hive_id FROM beehives WHERE sensor_id = $1";
-    const getHiveIdValues = [sensorId];
-    const result = await db.query(getHiveIdQuery, getHiveIdValues);
-
-    if (result.rows.length === 0) {
+    // 1. Find the hive by current sensor_id
+    const hive = await Beehive.findOne({ sensor_id: sensorId });
+    if (!hive) {
       return res.status(404).json({ message: "Hive not found" });
     }
 
-    const hiveId = result.rows[0].hive_id;
-    console.log("Hive ID to update:", hiveId);
+    console.log("Hive ID to update:", hive._id);
 
-    // 2. If newSensorid is provided and not empty, check if it already exists
+    // 2. Check if the new sensor_id already exists, ignoring the current hive
     if (newSensorid && newSensorid.trim() !== "") {
-      const sensorIdResponse = await axios.get(
-        `${process.env.REACT_APP_API_URL}/admin/sensor-ids`
-      );
-      const sensorIds = sensorIdResponse.data; // array of { sensor_id: value }
-
-      const exists = sensorIds.some(
-        (obj) => obj.sensor_id === newSensorid.trim()
-      );
-      if (exists) {
+      const existingSensor = await Beehive.findOne({
+        sensor_id: newSensorid.trim(),
+        _id: { $ne: hive._id }  // exclude itself
+      });
+      if (existingSensor) {
         return res.status(400).json({ message: "Sensor ID already exists." });
       }
-      // If it doesn't exist, allow the update (continue)
     }
 
-    // 3. Build the dynamic UPDATE query
-    let updateParts = [];
-    let updateValues = [];
+    // 3. Prepare fields to update
+    const updateFields = {};
 
     if (newHiveName && newHiveName.trim() !== "") {
-      updateParts.push(`hive_name = $${updateValues.length + 1}`);
-      updateValues.push(newHiveName.trim());
+      updateFields.hive_name = newHiveName.trim();
     }
 
     if (newHiveLocation && newHiveLocation.trim() !== "") {
-      updateParts.push(`hive_location = $${updateValues.length + 1}`);
-      updateValues.push(newHiveLocation.trim());
+      updateFields.hive_location = newHiveLocation.trim();
     }
 
     if (newSensorid && newSensorid.trim() !== "") {
-      updateParts.push(`sensor_id = $${updateValues.length + 1}`);
-      updateValues.push(newSensorid.trim());
+      updateFields.sensor_id = newSensorid.trim();
     }
 
-    // Add hive_id to the WHERE clause
-    updateValues.push(hiveId);
+    updateFields.updated_at = new Date();  // keep your timestamp consistent
 
-    const updateQuery = `
-      UPDATE beehives
-      SET ${updateParts.join(", ")}
-      WHERE hive_id = $${updateValues.length}
-    `;
-
-    await db.query(updateQuery, updateValues);
+    // 4. Apply the update
+    await Beehive.updateOne(
+      { _id: hive._id },
+      { $set: updateFields }
+    );
 
     res.status(200).json({
       message: "Hive updated successfully",
-      updatedFields: updateParts.map((part) => part.split(" = ")[0]),
+      updatedFields: Object.keys(updateFields),
     });
   } catch (err) {
     console.error(err);
@@ -755,15 +737,20 @@ app.get("/api/public_alert-config", async (req, res) => {
     return res.status(400).json({ error: "Missing user_id in query" });
   }
 
+  // Validate and convert user_id to ObjectId
+  let userObjectId;
   try {
-    const result = await db.query(
-      'SELECT * FROM sms_alert_settings WHERE user_id = $1',
-      [user_id]
-    );
+    userObjectId = new mongoose.Types.ObjectId(user_id);
+  } catch (err) {
+    return res.status(400).json({ error: "Invalid user_id format" });
+  }
 
-    if (result.rows.length === 0) {
+  try {
+    const settings = await SmsAlertSettings.findOne({ user_id: userObjectId });
+
+    if (!settings) {
       return res.status(200).json({
-MIN_TEMP: 32,
+        MIN_TEMP: 32,
         MAX_TEMP: 36,
         MIN_HUMIDITY: 50,
         MAX_HUMIDITY: 70,
@@ -772,48 +759,57 @@ MIN_TEMP: 32,
         isAlertsON: false,
         REFERENCE_LATITUDE: null,
         REFERENCE_LONGITUDE: null
-            });
+      });
     }
 
-    const row = result.rows[0];
-
     return res.status(200).json({
-      MIN_TEMP: row.min_temp,
-      MAX_TEMP: row.max_temp,
-      MIN_HUMIDITY: row.min_humidity,
-      MAX_HUMIDITY: row.max_humidity,
-      MIN_WEIGHT: row.min_weight,
-      MAX_WEIGHT: row.max_weight,
-      isAlertsON: row.is_alerts_on,
-      REFERENCE_LATITUDE: row.latitude,
-      REFERENCE_LONGITUDE: row.longitude
+      MIN_TEMP: settings.min_temp,
+      MAX_TEMP: settings.max_temp,
+      MIN_HUMIDITY: settings.min_humidity,
+      MAX_HUMIDITY: settings.max_humidity,
+      MIN_WEIGHT: settings.min_weight,
+      MAX_WEIGHT: settings.max_weight,
+      isAlertsON: settings.is_alerts_on,
+      REFERENCE_LATITUDE: settings.latitude,
+      REFERENCE_LONGITUDE: settings.longitude
     });
   } catch (error) {
     console.error("Error fetching alert config:", error);
-    res.status(500).json({ error: "Internal Server Error" });
+    return res.status(500).json({ error: "Internal Server Error" });
   }
 });
 //get sensor data from sim800c 
 app.get('/api/public_get_sensor_data', async (req, res) => {
   const { user_id, sensor_id } = req.query;
 
-  const query = `
-SELECT sd.*
-FROM beehives b
-JOIN users u ON u.user_id = b.user_id
-JOIN sensors_data sd ON sd.sensor_id = b.sensor_id
-WHERE u.user_id = $1
-  AND b.sensor_id = $2
-ORDER BY sd.created_at DESC
-LIMIT 1;
-  `;
+  if (!user_id || !sensor_id) {
+    return res.status(400).json({ error: 'Missing user_id or sensor_id' });
+  }
+
+  let userObjectId;
+  try {
+    userObjectId = new mongoose.Types.ObjectId(user_id);
+  } catch {
+    return res.status(400).json({ error: 'Invalid user_id format' });
+  }
 
   try {
-    const result = await db.query(query, [user_id, sensor_id]);
-    if (result.rowCount === 0) {
+    // Step 1: find the beehive that belongs to user and has the sensor_id
+    const hive = await Beehive.findOne({ user_id: userObjectId, sensor_id: sensor_id });
+    if (!hive) {
       return res.status(404).json({ error: 'Sensor not found for this user' });
     }
-    res.json(result.rows[0]);
+
+    // Step 2: find latest sensor data for this sensor_id
+    const sensorData = await SensorsData.findOne({ sensor_id: sensor_id })
+      .sort({ created_at: -1 })  // descending by created_at
+      .lean();
+
+    if (!sensorData) {
+      return res.status(404).json({ error: 'No sensor data found' });
+    }
+
+    res.json(sensorData);
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: 'Database error' });
@@ -821,20 +817,26 @@ LIMIT 1;
 });
 // === GET SMS Alerts Configuration From database ===
 app.get("/api/sms-alert-settings", async (req, res) => {
-  if (!req.isAuthenticated()) {
+  // Assuming you have a session/auth middleware setting req.user
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
   try {
-    const userId = req.user.user_id;
+    const userId = req.user._id;
 
-    const result = await db.query(
-      'SELECT * FROM sms_alert_settings WHERE user_id = $1',
-      [userId]
-    );
+    // Convert to ObjectId if needed
+    let userObjectId;
+    try {
+      userObjectId = new mongoose.Types.ObjectId(userId);
+    } catch {
+      return res.status(400).json({ error: "Invalid user_id format" });
+    }
 
-    if (result.rows.length === 0) {
-      // No settings found — return defaults
+    const settings = await SmsAlertSettings.findOne({ user_id: userObjectId });
+
+    if (!settings) {
+      // Return defaults if not found
       return res.status(200).json({
         MIN_TEMP: 32,
         MAX_TEMP: 36,
@@ -844,24 +846,20 @@ app.get("/api/sms-alert-settings", async (req, res) => {
         MAX_WEIGHT: 100,
         isAlertsON: false,
         REFERENCE_LATITUDE: 35.5024,
-        REFERENCE_LONGITUDE: 11.0457
+        REFERENCE_LONGITUDE: 11.0457,
       });
     }
 
-    // Return first row of user-specific settings
-    const row = result.rows[0];
-
     return res.status(200).json({
-      MIN_TEMP: row.min_temp,
-      MAX_TEMP: row.max_temp,
-      MIN_HUMIDITY: row.min_humidity,
-      MAX_HUMIDITY: row.max_humidity,
-      MIN_WEIGHT: row.min_weight,
-      MAX_WEIGHT: row.max_weight,
-      isAlertsON: row.is_alerts_on,
-      REFERENCE_LATITUDE: row.latitude,
-      REFERENCE_LONGITUDE: row.longitude
-
+      MIN_TEMP: settings.min_temp,
+      MAX_TEMP: settings.max_temp,
+      MIN_HUMIDITY: settings.min_humidity,
+      MAX_HUMIDITY: settings.max_humidity,
+      MIN_WEIGHT: settings.min_weight,
+      MAX_WEIGHT: settings.max_weight,
+      isAlertsON: settings.is_alerts_on,
+      REFERENCE_LATITUDE: settings.latitude,
+      REFERENCE_LONGITUDE: settings.longitude,
     });
   } catch (error) {
     console.error("Error fetching SMS alert settings:", error);
@@ -870,56 +868,50 @@ app.get("/api/sms-alert-settings", async (req, res) => {
 });
 // udate the alers sms setting in the db 
 app.post("/api/update_alert-config", async (req, res) => {
-  if (!req.isAuthenticated()) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
   try {
-    const userId = req.user.user_id;
+    const userId = req.user._id;
+
+    // Validate userId format
+    let userObjectId;
+    try {
+      userObjectId = new mongoose.Types.ObjectId(userId);
+    } catch {
+      return res.status(400).json({ error: "Invalid user_id format" });
+    }
 
     const {
       MIN_TEMP,
-  MAX_TEMP,
-  MIN_HUMIDITY,
-  MAX_HUMIDITY,
-  MIN_WEIGHT,
-  MAX_WEIGHT,
-  isAlertsON,
-  REFERENCE_LATITUDE,
-  REFERENCE_LONGITUDE
+      MAX_TEMP,
+      MIN_HUMIDITY,
+      MAX_HUMIDITY,
+      MIN_WEIGHT,
+      MAX_WEIGHT,
+      isAlertsON,
+      REFERENCE_LATITUDE,
+      REFERENCE_LONGITUDE,
     } = req.body;
 
-    await db.query(
-  `
-  INSERT INTO sms_alert_settings 
-    (user_id, min_temp, max_temp, min_humidity, max_humidity, min_weight, max_weight, is_alerts_on, latitude, longitude)
-  VALUES 
-    ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-  ON CONFLICT (user_id) 
-  DO UPDATE SET 
-    min_temp = EXCLUDED.min_temp,
-    max_temp = EXCLUDED.max_temp,
-    min_humidity = EXCLUDED.min_humidity,
-    max_humidity = EXCLUDED.max_humidity,
-    min_weight = EXCLUDED.min_weight,
-    max_weight = EXCLUDED.max_weight,
-    is_alerts_on = EXCLUDED.is_alerts_on,
-    latitude = EXCLUDED.latitude,
-    longitude = EXCLUDED.longitude
-  `,
-  [
-    userId,
-    MIN_TEMP,
-    MAX_TEMP,
-    MIN_HUMIDITY,
-    MAX_HUMIDITY,
-    MIN_WEIGHT,
-    MAX_WEIGHT,
-    isAlertsON,
-    REFERENCE_LATITUDE,
-    REFERENCE_LONGITUDE
-  ]
-);
+    // Upsert (insert if not exists, else update)
+    await SmsAlertSettings.findOneAndUpdate(
+      { user_id: userObjectId },
+      {
+        min_temp: MIN_TEMP,
+        max_temp: MAX_TEMP,
+        min_humidity: MIN_HUMIDITY,
+        max_humidity: MAX_HUMIDITY,
+        min_weight: MIN_WEIGHT,
+        max_weight: MAX_WEIGHT,
+        is_alerts_on: isAlertsON,
+        latitude: REFERENCE_LATITUDE,
+        longitude: REFERENCE_LONGITUDE,
+        updated_at: new Date(),
+      },
+      { upsert: true, new: true }
+    );
 
     res.status(200).json({ message: "Alert settings saved successfully" });
   } catch (error) {
@@ -929,84 +921,94 @@ app.post("/api/update_alert-config", async (req, res) => {
 });
 // Delete Hive API
 app.delete("/api/delete-hive", async (req, res) => {
-  if (!req.isAuthenticated()) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
   const sensorId = req.user.current_sensor_id;
-
   if (!sensorId) {
     return res.status(400).json({ error: "No current sensor selected" });
   }
 
   try {
-    // Begin transaction
-    await db.query("BEGIN");
-
-    // Delete all data related to the sensor in sensors_data
-    await db.query("DELETE FROM sensors_data WHERE sensor_id = $1", [sensorId]);
-
-    // Delete the hive from beehives table
-    await db.query("DELETE FROM beehives WHERE sensor_id = $1", [sensorId]);
-
-    // Optionally, also unset current_sensor_id from the user
-    await db.query(
-      "UPDATE users SET current_sensor_id = NULL WHERE current_sensor_id = $1",
-      [sensorId]
+    // Sequential deletes without transaction/session
+    await SensorsData.deleteMany({ sensor_id: sensorId });
+    await Beehive.deleteOne({ sensor_id: sensorId });
+    await User.updateMany(
+      { current_sensor_id: sensorId },
+      { $unset: { current_sensor_id: "" } }
     );
-
-    // Commit transaction
-    await db.query("COMMIT");
 
     res.status(200).json({ message: `Hive and related data for sensor '${sensorId}' deleted.` });
   } catch (error) {
-    await db.query("ROLLBACK");
     console.error("Error deleting hive:", error);
     res.status(500).json({ error: "Failed to delete hive" });
   }
 });
-
 //////////////////////////////// Alerts History APIS ///////////////////////////
 // Get Alerts history API 
 app.get('/api/alerts-history', async (req, res) => {
-  if (!req.isAuthenticated()) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const userId = req.user.user_id; // the logged-in user ID from the session
+  const userId = req.user._id;
+ // console.log("req.user:", req.user);
+//console.log("req.user.user_id:", req.user.user_id);
+//console.log("Is valid ObjectId?", mongoose.Types.ObjectId.isValid(req.user.user_id));
+
+  // Validate userId ObjectId format
+  let userObjectId;
+  try {
+    userObjectId = new mongoose.Types.ObjectId(userId);
+  } catch {
+    return res.status(400).json({ error: "Invalid user_id format" });
+  }
 
   try {
-    const result = await db.query(
-      'SELECT * FROM alerts_history WHERE user_id = $1 ORDER BY date DESC',
-      [userId]
-    );
-    res.json(result.rows);
+    const alerts = await AlertsHistory.find({ user_id: userObjectId })
+      .sort({ date: -1 })
+      .exec();
+
+    res.json(alerts);
   } catch (err) {
     console.error('Error fetching alerts_history:', err);
     res.status(500).json({ error: 'Internal Server Error' });
   }
 });
-// insert Alerts history API 
+
 app.post('/api/alerts-history', async (req, res) => {
-  if (!req.isAuthenticated()) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
+  const userId = req.user._id;
+  const { alert_type, status, sensor_id } = req.body;
+
+  if (!alert_type || !status || !sensor_id) {
+    return res.status(400).json({ error: "Missing required fields" });
+  }
+
+  // Validate userId ObjectId format
+  let userObjectId;
   try {
-    const { alert_type, status, sensor_id } = req.body;
-    const userId = req.user.user_id; // from passport session
-if (!alert_type || !status || !sensor_id) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
+    userObjectId = new mongoose.Types.ObjectId(userId);
+  } catch {
+    return res.status(400).json({ error: "Invalid user_id format" });
+  }
 
-    const result = await db.query(
-      `INSERT INTO alerts_history (user_id, alert_type, status, sensor_id)
-       VALUES ($1, $2, $3, $4)
-       RETURNING *`,
-      [userId, alert_type, status, sensor_id]
-    );
+  try {
+    const newAlert = new AlertsHistory({
+      user_id: userObjectId,
+      alert_type,
+      status,
+      sensor_id,
+      date: new Date(), // optional, defaults in schema
+    });
 
-    res.status(201).json(result.rows[0]);
+    const savedAlert = await newAlert.save();
+
+    res.status(201).json(savedAlert);
   } catch (err) {
     console.error('Error inserting alert:', err);
     res.status(500).json({ error: "Internal Server Error" });
@@ -1014,26 +1016,38 @@ if (!alert_type || !status || !sensor_id) {
 });
 // heath status counts api 
 app.get('/api/health-status-count', async (req, res) => {
-  if (!req.isAuthenticated()) {
+  if (!req.isAuthenticated || !req.isAuthenticated()) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const userId = req.user.user_id;
+  const userId = req.user._id;  // note: from the session with MongoDB auth
 
   try {
-    const result = await db.query(
-      `
-      SELECT health_status, COUNT(*) AS count
-      FROM beehives
-      WHERE user_id = $1
-      GROUP BY health_status
-      ORDER BY health_status;
-      `,
-      [userId]
-    );
+    const result = await Beehive.aggregate([
+      {
+        $match: {
+          user_id: userId
+        }
+      },
+      {
+        $group: {
+          _id: "$health_status",
+          count: { $sum: 1 }
+        }
+      },
+      {
+        $project: {
+          health_status: "$_id",
+          count: 1,
+          _id: 0
+        }
+      },
+      {
+        $sort: { health_status: 1 }
+      }
+    ]);
 
-    // Return rows like [{ health_status: "Healthy", count: 5 }, ...]
-    res.json(result.rows);
+    res.json(result); // same format your frontend expects
   } catch (error) {
     console.error("Error fetching health status counts:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -1044,27 +1058,45 @@ app.get("/api/healthy-hives-week", async (req, res) => {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
-  const userId = req.user.user_id;
+  const userId = req.user._id;
 
   try {
-    const result = await db.query(
-      `
-      SELECT
-        to_char(updated_at::date, 'YYYY-MM-DD') as day,
-        COUNT(*) as healthy_count
-      FROM beehives
-      WHERE user_id = $1
-        AND health_status = 'Healthy'
-        AND updated_at >= CURRENT_DATE - INTERVAL '6 days'
-      GROUP BY day
-      ORDER BY day ASC;
-      `,
-      [userId]
-    );
+    // aggregation
+    const pipeline = [
+      {
+        $match: {
+          user_id: userId,
+          health_status: "Healthy",
+          updated_at: {
+            $gte: new Date(new Date().setDate(new Date().getDate() - 6))  // 6 days ago
+          }
+        }
+      },
+      {
+        $group: {
+          _id: {
+            day: { $dateToString: { format: "%Y-%m-%d", date: "$updated_at" } }
+          },
+          healthy_count: { $sum: 1 }
+        }
+      },
+      {
+        $sort: { "_id.day": 1 }
+      },
+      {
+        $project: {
+          day: "$_id.day",
+          healthy_count: 1,
+          _id: 0
+        }
+      }
+    ];
 
-    res.json(result.rows);
+    const result = await Beehive.aggregate(pipeline);
+
+    res.json(result);
   } catch (err) {
-    console.error("Error fetching weekly healthy counts", err);
+    console.error("Error fetching healthy hive counts", err);
     res.status(500).json({ error: "Internal Server Error" });
   }
 });
